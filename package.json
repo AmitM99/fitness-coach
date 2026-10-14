@@ -1,0 +1,40 @@
+{
+  "name": "fitness-coach",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Private single-user training & nutrition tracker. Local-first, no accounts, no telemetry.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "build:nomedia": "tsc -b && vite build --outDir dist-nomedia && node scripts/strip-media.mjs dist-nomedia",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit false --emitDeclarationOnly false || tsc -p tsconfig.app.json --noEmit",
+    "lint": "eslint .",
+    "data:build": "node scripts/build-data.mjs",
+    "data:media": "node scripts/fetch-media.mjs",
+    "data:media:gifs": "node scripts/fetch-media.mjs --gifs",
+    "deploy:login": "wrangler login",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name=coach --commit-dirty=true"
+  },
+  "dependencies": {
+    "dexie": "^4.0.11",
+    "dexie-react-hooks": "^1.1.7",
+    "lucide-react": "^0.475.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "recharts": "^2.15.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "wrangler": "^4.123.0"
+  }
+}

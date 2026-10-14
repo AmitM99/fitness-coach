@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-ink-950 text-ink-100 font-sans antialiased;
+    overscroll-behavior-y: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Numbers in a training log are scanned, not read — keep them tabular so
+     columns of weights line up. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Hebrew explanatory text sits inside an otherwise-English UI. */
+  .he {
+    direction: rtl;
+    text-align: right;
+    unicode-bidi: isolate;
+  }
+
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+
+  ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+}
+
+@layer components {
+  /* Skulpt-style surfaces: borderless, softly rounded, elevated by tone only. */
+  .card {
+    @apply bg-ink-900 rounded-3xl;
+  }
+
+  .field {
+    @apply w-full bg-ink-800 border border-transparent rounded-2xl px-3.5 py-2.5 text-ink-100
+           placeholder:text-ink-500 outline-none focus:border-accent-500/70 transition-colors;
+  }
+
+  .chip {
+    @apply px-3.5 py-1.5 rounded-full text-sm font-medium border transition-colors whitespace-nowrap;
+  }
+
+  .chip-off {
+    @apply bg-ink-900 border-transparent text-ink-300 hover:bg-ink-800;
+  }
+
+  .chip-on {
+    @apply bg-ink-100 border-ink-100 text-ink-950 font-semibold;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-3 whitespace-nowrap
+           font-semibold transition-[background-color,transform] active:scale-[0.98]
+           disabled:opacity-40 disabled:pointer-events-none;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent-500 text-ink-950 hover:bg-accent-400 active:bg-accent-600;
+  }
+
+  .btn-ghost {
+    @apply btn bg-ink-800 text-ink-100 hover:bg-ink-700;
+  }
+
+  .btn-danger {
+    @apply btn bg-bad/15 text-bad hover:bg-bad/25;
+  }
+
+  /* Round icon button — the circular controls Skulpt uses everywhere. */
+  .icon-btn {
+    @apply w-10 h-10 shrink-0 rounded-full bg-ink-900 text-ink-100 flex items-center justify-center
+           transition-colors hover:bg-ink-800 active:scale-95;
+  }
+
+  .label {
+    @apply text-xs font-medium uppercase tracking-wide text-ink-500;
+  }
+
+  /* Hides the scrollbar on the horizontal date/filter rails. */
+  .rail {
+    @apply flex gap-2 overflow-x-auto;
+    scrollbar-width: none;
+  }
+}

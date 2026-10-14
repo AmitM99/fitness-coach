@@ -1,0 +1,28 @@
+# Cloudflare Pages headers.
+#
+# Hashed asset filenames change on every build, so they can be cached forever.
+# The reference datasets change only when `npm run data:build` is re-run.
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/exercise-media/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/data/*
+  Cache-Control: public, max-age=86400
+
+# The HTML names the hashed bundles, so it must never be served stale —
+# that is exactly how a browser ends up running a previous build.
+/
+  Cache-Control: no-cache, must-revalidate
+
+/index.html
+  Cache-Control: no-cache, must-revalidate
+
+/sw.js
+  Cache-Control: no-cache, must-revalidate
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
