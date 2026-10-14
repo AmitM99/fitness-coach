@@ -15,7 +15,7 @@
     "data:media": "node scripts/fetch-media.mjs",
     "data:media:gifs": "node scripts/fetch-media.mjs --gifs",
     "deploy:login": "wrangler login",
-    "deploy": "npm run build && wrangler pages deploy dist --project-name=coach --commit-dirty=true"
+    "deploy": "npm run build && wrangler pages deploy dist --project-name=coach --branch=main. --commit-dirty=true"
   },
   "dependencies": {
     "dexie": "^4.0.11",
