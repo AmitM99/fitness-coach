@@ -20,11 +20,14 @@ programs/
 scripts/make-starter-backup.mjs
 # Session notes for the coach — full of personal context.
 HANDOFF.md
+# Weekly coach reviews — real weights, sleep, HRV and health notes.
+reviews/
 # Raw Garmin exports (sleep, HRV, runs).
 archive/cardio-2026-10/sync/
 
 # --- Local tooling / build output ---------------------------------------------
 .claude/settings.local.json
+.omc/
 .wrangler/
 *.tsbuildinfo
 dist-nomedia/
