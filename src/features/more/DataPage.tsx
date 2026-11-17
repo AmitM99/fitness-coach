@@ -2,12 +2,29 @@ import { useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Download, Upload, FileSpreadsheet, AlertTriangle, Trash2, HardDrive, ShieldCheck } from 'lucide-react';
 import { requestPersistentStorage, storageEstimate } from '@/db/seed';
-import { db } from '@/db/schema';
+import { db, DEFAULT_SETTINGS } from '@/db/schema';
 import { Screen, Card, SectionTitle, HeNote, Sheet, Confirm, useToast } from '@/components/ui';
 import {
-  exportBackup, importBackup, exportWorkoutsCsv, exportBodyCsv, exportNutritionCsv,
+  exportBackup, importBackup, MAX_IMPORT_BYTES, exportWorkoutsCsv, exportBodyCsv, exportNutritionCsv,
   downloadFile, stamp,
 } from '@/lib/backup';
+
+/** Wipes everything the user recorded, leaving programs, profile and settings. */
+async function clearHistory() {
+  await db.transaction(
+    'rw',
+    [db.sessions, db.setLogs, db.weights, db.measurements, db.foodLogs, db.habits,
+     db.habitLogs, db.reviews, db.photos, db.exerciseNotes, db.cardio, db.recovery],
+    async () => {
+      await Promise.all([
+        db.sessions.clear(), db.setLogs.clear(), db.weights.clear(),
+        db.measurements.clear(), db.foodLogs.clear(), db.habits.clear(),
+        db.habitLogs.clear(), db.reviews.clear(), db.photos.clear(),
+        db.exerciseNotes.clear(), db.cardio.clear(), db.recovery.clear(),
+      ]);
+    }
+  );
+}
 
 export default function DataPage() {
   const toast = useToast();
@@ -18,6 +35,7 @@ export default function DataPage() {
   const [pendingImport, setPendingImport] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [confirmWipe, setConfirmWipe] = useState(false);
+  const [confirmWipeAll, setConfirmWipeAll] = useState(false);
   const [persisted, setPersisted] = useState<boolean | null>(null);
   const [usage, setUsage] = useState<{ usedMb: number; quotaMb: number } | null>(null);
 
@@ -50,6 +68,11 @@ export default function DataPage() {
 
   async function onFile(file: File | undefined) {
     if (!file) return;
+    if (file.size > MAX_IMPORT_BYTES) {
+      toast('That file is too large to be a Coach backup', 'bad');
+      if (fileRef.current) fileRef.current.value = '';
+      return;
+    }
     try {
       const text = await file.text();
       setPendingImport(JSON.parse(text));
@@ -229,14 +252,21 @@ export default function DataPage() {
         <div className="flex items-start gap-3 mb-4">
           <AlertTriangle size={18} className="text-bad mt-0.5 shrink-0" />
           <HeNote className="text-xs text-ink-400 leading-relaxed">
-            מוחק את מה שתיעדת — אימונים, משקל, היקפים, תמונות ותזונה. <strong>הפרופיל,
-            ההגדרות והתוכניות שלך נשמרים</strong>, וכך גם ספריית התרגילים ומאגר המזון.
+            <strong>ניקוי היסטוריה</strong> מוחק את מה שתיעדת — אימונים, הערות, ריצות, שינה, משקל,
+            היקפים, תמונות ותזונה. הפרופיל, ההגדרות והתוכניות נשמרים.
+            <br />
+            <strong>מחיקה מלאה</strong> מוחקת גם את הפרופיל (כולל מידע רפואי), התוכניות, ההגדרות
+            ומפתח ה‑API. ספריית התרגילים ומאגר המזון נשארים.
             אין דרך לשחזר בלי קובץ גיבוי.
           </HeNote>
         </div>
         <button className="btn-danger w-full" onClick={() => setConfirmWipe(true)}>
           <Trash2 size={16} />
-          Erase all my data
+          Clear my activity history
+        </button>
+        <button className="btn-danger w-full mt-2" onClick={() => setConfirmWipeAll(true)}>
+          <Trash2 size={16} />
+          Delete everything (profile, settings, API key)
         </button>
       </Card>
 
@@ -258,25 +288,37 @@ export default function DataPage() {
 
       <Confirm
         open={confirmWipe}
-        title="Erase all your data?"
-        body="Workouts, weigh-ins, measurements, photos and food logs will be permanently deleted from this device. Your athlete profile and settings are kept."
-        confirmLabel="Erase everything"
+        title="Clear your activity history?"
+        body="Workouts, exercise notes, runs, sleep, weigh-ins, measurements, photos and food logs will be permanently deleted from this device. Your profile, settings and programs are kept."
+        confirmLabel="Clear history"
         onConfirm={async () => {
-          await db.transaction(
-            'rw',
-            [db.programs, db.sessions, db.setLogs, db.weights, db.measurements,
-             db.foodLogs, db.habits, db.habitLogs, db.reviews, db.photos],
-            async () => {
-              await Promise.all([
-                db.sessions.clear(), db.setLogs.clear(),
-                db.weights.clear(), db.measurements.clear(), db.foodLogs.clear(),
-                db.habits.clear(), db.habitLogs.clear(), db.reviews.clear(), db.photos.clear(),
-              ]);
-            }
-          );
-          toast('All personal data erased');
+          await clearHistory();
+          toast('Activity history cleared');
+          setConfirmWipe(false);
         }}
         onCancel={() => setConfirmWipe(false)}
+      />
+
+      <Confirm
+        open={confirmWipeAll}
+        title="Delete everything?"
+        body="All history, your athlete profile (including medical notes), programs, settings and the saved API key will be permanently deleted from this device. The exercise library and food database stay. This cannot be undone without a backup file."
+        confirmLabel="Delete everything"
+        onConfirm={async () => {
+          await clearHistory();
+          await db.transaction('rw', [db.programs, db.profile, db.settings], async () => {
+            await db.programs.clear();
+            await db.profile.clear();
+            // Reset rather than delete: seededVersion must survive, or the next
+            // launch would treat the library as unseeded and reload it.
+            const current = await db.settings.get('settings');
+            await db.settings.put({ ...DEFAULT_SETTINGS, seededVersion: current?.seededVersion ?? 0 });
+          });
+          try { localStorage.clear(); } catch { /* storage may be unavailable */ }
+          toast('Everything deleted from this device');
+          setConfirmWipeAll(false);
+        }}
+        onCancel={() => setConfirmWipeAll(false)}
       />
     </Screen>
   );

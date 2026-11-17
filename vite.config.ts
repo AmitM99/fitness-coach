@@ -12,6 +12,7 @@ export default defineConfig({
   },
   server: {
     port: 5180,
-    host: true, // reachable from the phone on the same Wi-Fi
+    // Localhost only by default; `npm run dev:lan` opens it to the Wi-Fi for the phone.
+    host: '127.0.0.1',
   },
 });

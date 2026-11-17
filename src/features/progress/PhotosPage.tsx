@@ -4,6 +4,7 @@ import { Camera, Trash2, Columns2, Grid3x3 } from 'lucide-react';
 import { db, uid, type ProgressPhoto } from '@/db/schema';
 import { Screen, Card, Empty, Sheet, HeNote, Confirm, useToast, cn } from '@/components/ui';
 import { longDate, todayKey } from '@/lib/date';
+import { sanitizePhoto } from '@/lib/image';
 
 const POSES = [
   { key: 'front', label: 'Front', he: 'חזית' },
@@ -58,17 +59,22 @@ export default function PhotosPage() {
 
   async function onFiles(files: FileList | null) {
     if (!files?.length) return;
-    for (const file of Array.from(files)) {
-      if (!file.type.startsWith('image/')) continue;
-      await db.photos.add({
-        id: uid(),
-        date: todayKey(),
-        pose,
-        blob: file,
-        note: '',
-      });
+    let added = 0;
+    for (const file of Array.from(files).slice(0, 20)) {
+      try {
+        await db.photos.add({
+          id: uid(),
+          date: todayKey(),
+          pose,
+          blob: await sanitizePhoto(file),
+          note: '',
+        });
+        added++;
+      } catch (err) {
+        toast((err as Error).message, 'bad');
+      }
     }
-    toast(`Added to ${pose}`);
+    if (added) toast(`Added to ${pose}`);
     if (fileRef.current) fileRef.current.value = '';
   }
 

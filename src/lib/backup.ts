@@ -1,4 +1,4 @@
-import { db, type CardioSession, type ProgressPhoto, type RecoveryDay } from '@/db/schema';
+import { db, EMPTY_PROFILE, type CardioSession, type Profile, type ProgressPhoto, type RecoveryDay } from '@/db/schema';
 
 /**
  * Requirement #10: the user must be able to walk away with everything, in a
@@ -28,9 +28,14 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
-async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
-  const res = await fetch(dataUrl);
-  return res.blob();
+/** Decodes a base64 data: URL directly — `fetch(data:)` would need CSP connect-src to allow data:. */
+function dataUrlToBlob(dataUrl: string): Blob {
+  const comma = dataUrl.indexOf(',');
+  const mime = /^data:([^;,]+)/.exec(dataUrl)?.[1] ?? 'application/octet-stream';
+  const bin = atob(dataUrl.slice(comma + 1));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
 }
 
 export async function exportBackup(opts: { includePhotos: boolean; includeApiKey: boolean }) {
@@ -101,16 +106,123 @@ export async function exportBackup(opts: { includePhotos: boolean; includeApiKey
   };
 }
 
-export async function importBackup(payload: unknown, mode: 'merge' | 'replace') {
-  const parsed = payload as Awaited<ReturnType<typeof exportBackup>>;
-  if (!parsed || parsed.app !== 'fitness-coach' || !parsed.data) {
+/** Hard ceilings so a malformed or hostile file cannot flood the database. */
+export const MAX_IMPORT_BYTES = 60 * 1024 * 1024;
+const MAX_ROWS_PER_TABLE = 200_000;
+const MAX_PHOTOS = 500;
+/** Any raster image the app could have stored; SVG is deliberately absent. */
+const SAFE_IMAGE_DATA_URL = /^data:image\/(png|jpe?g|webp|heic|heif|gif|avif);base64,[A-Za-z0-9+/=]+$/i;
+
+const ARRAY_TABLES = [
+  'programs', 'sessions', 'setLogs', 'weights', 'measurements', 'foodLogs',
+  'habits', 'habitLogs', 'reviews', 'exerciseNotes', 'cardio', 'recovery', 'photos',
+] as const;
+
+type Row = Record<string, unknown>;
+const isStr = (v: unknown): v is string => typeof v === 'string';
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+/** Optional or nullable number: absent, null, or a finite number. */
+const isNumOpt = (v: unknown) => v === undefined || v === null || isNum(v);
+const isDay = (v: unknown): v is string => isStr(v) && /^\d{4}-\d{2}-\d{2}/.test(v);
+
+/** Per-table checks for the fields that feed arithmetic, sorting and index lookups. */
+const ROW_CHECKS: Record<string, (r: Row) => boolean> = {
+  weights: (r) => isDay(r.date) && isNum(r.kg),
+  measurements: (r) => isDay(r.date) && isStr(r.key) && isNum(r.cm),
+  sessions: (r) => isDay(r.date) && isStr(r.status),
+  setLogs: (r) =>
+    isStr(r.sessionId) && isStr(r.exerciseId) && isNum(r.setIndex) &&
+    isNumOpt(r.weight) && isNumOpt(r.reps) && isNumOpt(r.rpe),
+  foodLogs: (r) =>
+    isDay(r.date) && isStr(r.meal) &&
+    isNum(r.grams) && isNum(r.kcal) && isNum(r.protein) && isNum(r.carbs) && isNum(r.fat),
+  habitLogs: (r) => isDay(r.date) && isStr(r.habitId),
+  reviews: (r) => isStr(r.weekStart),
+  exerciseNotes: (r) => isStr(r.sessionId) && isStr(r.exerciseId) && isStr(r.text),
+  cardio: (r) => isStr(r.id) && isDay(r.date) && isStr(r.dedupeKey),
+  recovery: (r) => isStr(r.id) && isDay(r.date),
+  programs: (r) =>
+    isStr(r.name) && Array.isArray(r.days) &&
+    r.days.every((d: Row) => d && typeof d === 'object' && Array.isArray(d.items) &&
+      d.items.every((i: Row) => i && typeof i === 'object' && isStr(i.exerciseId))),
+};
+
+/**
+ * Structural and type checks before anything is written. Pure — it touches no
+ * database, so it can be run against a file without importing it. Not a full
+ * schema: it covers the fields the app does maths and lookups on.
+ */
+export function validateBackup(payload: unknown): void {
+  const parsed = payload as { app?: unknown; backupVersion?: unknown; data?: unknown } | null;
+  if (!parsed || typeof parsed !== 'object' || parsed.app !== 'fitness-coach'
+      || !parsed.data || typeof parsed.data !== 'object' || Array.isArray(parsed.data)) {
     throw new Error('This does not look like a Coach backup file.');
   }
-  if (parsed.backupVersion > BACKUP_VERSION) {
+  if (!Number.isInteger(parsed.backupVersion) || (parsed.backupVersion as number) < 1) {
+    throw new Error('This backup has no valid version number.');
+  }
+  if ((parsed.backupVersion as number) > BACKUP_VERSION) {
     throw new Error('This backup was made by a newer version of the app.');
   }
+  const d = parsed.data as Record<string, unknown>;
 
-  const d = parsed.data;
+  for (const key of ARRAY_TABLES) {
+    const rows = d[key];
+    if (rows === undefined || rows === null) continue;
+    if (!Array.isArray(rows)) throw new Error(`Backup field "${key}" must be a list.`);
+    if (rows.length > MAX_ROWS_PER_TABLE) throw new Error(`Backup field "${key}" is too large.`);
+    const check = ROW_CHECKS[key];
+    for (const row of rows) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) {
+        throw new Error(`Backup field "${key}" contains an invalid entry.`);
+      }
+      if (!isStr((row as Row).id)) {
+        throw new Error(`Backup field "${key}" contains an entry without an id.`);
+      }
+      if (check && !check(row as Row)) {
+        throw new Error(`Backup field "${key}" contains an entry with a wrong or missing value.`);
+      }
+    }
+  }
+
+  const photos = (d.photos ?? []) as { dataUrl?: unknown; date?: unknown }[];
+  if (photos.length > MAX_PHOTOS) throw new Error('Backup holds too many photos.');
+  for (const p of photos) {
+    if (!isStr(p.dataUrl) || !SAFE_IMAGE_DATA_URL.test(p.dataUrl)) {
+      throw new Error('Backup contains a photo that is not a plain image.');
+    }
+    if (!isDay(p.date)) throw new Error('Backup contains a photo without a date.');
+  }
+  for (const key of ['settings', 'profile'] as const) {
+    const v = d[key];
+    if (v !== undefined && v !== null && (typeof v !== 'object' || Array.isArray(v))) {
+      throw new Error(`Backup field "${key}" is malformed.`);
+    }
+  }
+}
+
+/**
+ * Merge semantics for the profile: a field that is empty in the file means
+ * "not said", not "erase it". Only non-empty values overwrite what is stored,
+ * so a coach-written profile update cannot blank out injuries or medical notes.
+ * Replace mode keeps the old behaviour of taking the file as-is.
+ */
+function mergeProfile(current: Profile | undefined, incoming: Partial<Profile>, mode: 'merge' | 'replace'): Profile {
+  if (mode === 'replace' || !current) return { ...EMPTY_PROFILE, ...incoming, id: 'profile' };
+  const merged: Record<string, unknown> = { ...current };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (k === 'id') continue;
+    if (v === null || v === undefined) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    merged[k] = v;
+  }
+  merged.id = 'profile';
+  return merged as unknown as Profile;
+}
+
+export async function importBackup(payload: unknown, mode: 'merge' | 'replace') {
+  validateBackup(payload);
+  const d = (payload as Awaited<ReturnType<typeof exportBackup>>).data;
 
   await db.transaction(
     'rw',
@@ -162,7 +274,7 @@ export async function importBackup(payload: unknown, mode: 'merge' | 'replace') 
           date: p.date,
           pose: p.pose as ProgressPhoto['pose'],
           note: p.note,
-          blob: await dataUrlToBlob(p.dataUrl),
+          blob: dataUrlToBlob(p.dataUrl),
         });
       }
 
@@ -171,14 +283,15 @@ export async function importBackup(payload: unknown, mode: 'merge' | 'replace') 
         await db.settings.put({
           ...d.settings,
           id: 'settings',
-          // Never let an imported file overwrite a key already on this device
-          // with an empty one.
-          anthropicApiKey: d.settings.anthropicApiKey || current?.anthropicApiKey || '',
+          // A key already on this device is never replaced by one from a file —
+          // a file is not a trusted source for a credential.
+          anthropicApiKey: current?.anthropicApiKey || d.settings.anthropicApiKey || '',
         });
       }
 
       if (d.profile) {
-        await db.profile.put({ ...d.profile, id: 'profile' });
+        const current = await db.profile.get('profile');
+        await db.profile.put(mergeProfile(current, d.profile, mode));
       }
     }
   );
@@ -187,8 +300,11 @@ export async function importBackup(payload: unknown, mode: 'merge' | 'replace') 
 /* ------------------------------------------------------------------ */
 
 function csvEscape(value: unknown): string {
-  const s = value === null || value === undefined ? '' : String(value);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  let s = value === null || value === undefined ? '' : String(value);
+  // A text cell starting with = + - @ is run as a formula by Excel/Sheets.
+  // Real numbers (typeof number) are left alone.
+  if (typeof value === 'string' && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 function toCsv(rows: Record<string, unknown>[], columns: string[]): string {
@@ -334,6 +450,19 @@ export async function exportNutritionCsv(): Promise<string> {
  * same plan twice gives two independent programs rather than silently
  * overwriting the one already in progress.
  */
+function clampNum(v: unknown, min: number, max: number, fallback: number): number {
+  const n = typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+/** Returns the text, or throws — program text is never silently cut short. */
+function limitText(v: unknown, max: number, label: string): string {
+  if (v === undefined || v === null) return '';
+  if (typeof v !== 'string') throw new Error(`${label} must be text.`);
+  if (v.length > max) throw new Error(`${label} is too long (${v.length} characters, limit ${max}).`);
+  return v;
+}
+
 export async function importProgram(payload: unknown): Promise<string> {
   const wrapper = payload as { app?: string; kind?: string; program?: unknown };
   const raw = (wrapper?.app === 'fitness-coach' && wrapper.kind === 'program'
@@ -343,6 +472,22 @@ export async function importProgram(payload: unknown): Promise<string> {
   if (!raw || typeof raw !== 'object' || !Array.isArray(raw.days) || !raw.name) {
     throw new Error('This file does not contain a program.');
   }
+  if (typeof raw.name !== 'string') throw new Error('Program name must be text.');
+  if (raw.days.length > 14) throw new Error('This program has more than 14 days.');
+  for (const day of raw.days) {
+    if (!day || typeof day !== 'object') throw new Error('A program day is malformed.');
+    if (day.items !== undefined && !Array.isArray(day.items)) throw new Error('A program day has no exercise list.');
+    if ((day.items ?? []).length > 40) throw new Error('A program day has more than 40 exercises.');
+    for (const item of day.items ?? []) {
+      if (!item || typeof item !== 'object' || typeof item.exerciseId !== 'string') {
+        throw new Error('A program exercise is malformed.');
+      }
+      if (item.alternatives !== undefined
+          && (!Array.isArray(item.alternatives) || item.alternatives.some((a) => typeof a !== 'string'))) {
+        throw new Error('A program exercise has malformed alternatives.');
+      }
+    }
+  }
 
   const { db: database, uid: newId } = await import('@/db/schema');
 
@@ -351,7 +496,7 @@ export async function importProgram(payload: unknown): Promise<string> {
 
   const days = raw.days.map((day) => ({
     id: newId(),
-    name: day.name ?? 'Day',
+    name: limitText(day.name, 120, 'Day name') || 'Day',
     dayOfWeek: day.dayOfWeek ?? null,
     items: (day.items ?? [])
       .filter((item) => {
@@ -366,11 +511,11 @@ export async function importProgram(payload: unknown): Promise<string> {
         id: newId(),
         exerciseId: item.exerciseId,
         group: item.group ?? null,
-        targetSets: item.targetSets ?? 3,
-        targetReps: item.targetReps ?? '8-10',
-        targetWeight: item.targetWeight ?? null,
-        restSec: item.restSec ?? 90,
-        notes: item.notes ?? '',
+        targetSets: clampNum(item.targetSets, 1, 20, 3),
+        targetReps: limitText(item.targetReps, 40, 'Target reps') || '8-10',
+        targetWeight: item.targetWeight == null ? null : clampNum(item.targetWeight, 0, 1000, 0),
+        restSec: clampNum(item.restSec, 0, 900, 90),
+        notes: limitText(item.notes, 2000, 'Exercise note'),
         alternatives: item.alternatives ?? [],
       })),
   }));
@@ -384,8 +529,8 @@ export async function importProgram(payload: unknown): Promise<string> {
   const id = newId();
   await database.programs.add({
     id,
-    name: raw.name,
-    description: raw.description ?? '',
+    name: limitText(raw.name, 200, 'Program name'),
+    description: limitText(raw.description, 6000, 'Program description'),
     createdAt: new Date().toISOString(),
     archived: false,
     active: false,
@@ -409,7 +554,13 @@ export async function importProgram(payload: unknown): Promise<string> {
 export async function importAlternatives(payload: unknown): Promise<{ items: number; programs: number }> {
   const map = (payload as { alternatives?: unknown })?.alternatives;
   if (!map || typeof map !== 'object') throw new Error('This file does not contain alternatives.');
+  if (Array.isArray(map)) throw new Error('This file does not contain alternatives.');
   const byExercise = map as Record<string, string[]>;
+  for (const [id, alts] of Object.entries(byExercise)) {
+    if (!Array.isArray(alts) || alts.length > 20 || alts.some((a) => typeof a !== 'string')) {
+      throw new Error(`Alternatives for "${id}" must be a short list of exercise ids.`);
+    }
+  }
 
   const { db: database } = await import('@/db/schema');
   const exerciseIds = new Set((await database.exercises.toArray()).map((e) => e.id));
